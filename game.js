@@ -80,14 +80,25 @@ window.startMatch = function() {
     gameState.matchStarted = true; gameState.activePlayerIndex = 0; set(gameRef, gameState);
 };
 
+// --- FIX 1: THE DEEP CLEAN FIREBASE FAILSAFE ---
 const gameRef = ref(db, 'battleship-match-1');
 onValue(gameRef, (snapshot) => { 
     if (snapshot.val()) { 
         gameState = snapshot.val(); 
         
-        // THE FAILSAFES: Forces Firebase arrays/objects to exist even if they are empty
+        // Force missing arrays to exist to prevent Turn Tracker crashes
         if(!gameState.joinedPlayers) gameState.joinedPlayers = [];
         if(!gameState.grid) gameState.grid = {}; 
+        if(!gameState.players) gameState.players = {};
+
+        ['p1', 'p2', 'p3', 'p4'].forEach(p => {
+            if(!gameState.players[p]) gameState.players[p] = getFreshPlayerState();
+            if(!gameState.players[p].buildQueue) gameState.players[p].buildQueue = [];
+            if(!gameState.players[p].readyToDeploy) gameState.players[p].readyToDeploy = [];
+            if(!gameState.players[p].reserveFleet) gameState.players[p].reserveFleet = [];
+            if(!gameState.players[p].minedMountains) gameState.players[p].minedMountains = [];
+            if(!gameState.players[p].buildings) gameState.players[p].buildings = { goldMine: 0, steelFactory: 0, shipyard: 0, baseDefense: 0 };
+        });
 
         if (currentPlayer && !gameState.matchStarted && !gameState.joinedPlayers.includes(currentPlayer)) {
             sessionStorage.removeItem('battleshipPlayerRole'); currentPlayer = null;
@@ -228,10 +239,6 @@ function updateUI() {
         } else overlay.style.display = 'none'; 
     }
 
-    if(!pData.buildQueue) pData.buildQueue = []; if(!pData.readyToDeploy) pData.readyToDeploy = [];
-    if(!pData.reserveFleet) pData.reserveFleet = []; if(!pData.minedMountains) pData.minedMountains = []; 
-    if(!pData.buildings.shipyard) pData.buildings.shipyard = 0; if(!pData.buildings.baseDefense) pData.buildings.baseDefense = 0;
-
     document.getElementById('resources').innerText = `Gold: ${pData.gold} | Steel: ${pData.steel} | Gems: ${pData.gems}`;
     document.getElementById('fleet-status').innerText = `Active Ships: ${pData.activeShips}/7 | Reserve: ${pData.reserveFleet.length}/3`;
     
@@ -320,26 +327,42 @@ window.prepDeployReserve = function(index) {
     if (!confirm(`Commander, deploy ${p.reserveFleet[index].type} from the Reserve Fleet?`)) return;
     currentSelection = p.reserveFleet[index]; deployingFromReserve = true; p.reserveFleet.splice(index, 1); updateUI();
 };
+
+// --- FIX 2: THE "SHOPPING CART" BUY SYSTEM ---
 window.buyShip = function(shipType) {
-    if (!confirm(`Confirm order to purchase/deploy: ${shipType}?`)) return;
     let p = gameState.players[currentPlayer]; const stats = UNIT_STATS[shipType];
+    
     if (shipType === 'Base' && p.basePlaced) return alert("Only 1 base permitted!");
     if (shipType !== 'Base' && !p.basePlaced) return alert("Deploy Base first!");
-    if (shipType === 'Destroyer' && !p.freeDestroyerPlaced) { currentSelection = 'Destroyer'; updateUI(); return; }
 
-    if (p.gold >= stats.costG && p.steel >= stats.costS) {
+    if (stats.turns > 0) {
+        // Queued ships take resources immediately
+        if (p.gold < stats.costG || p.steel < stats.costS) return alert(`Insufficient resources!`);
+        if (!confirm(`Queue ${shipType} for construction? (${stats.costG}G, ${stats.costS}S)`)) return;
         p.gold -= stats.costG; p.steel -= stats.costS;
-        if (stats.turns > 0) { p.buildQueue.push({ type: shipType, turnsLeft: stats.turns }); alert(`${shipType} queued.`); set(gameRef, gameState); } 
-        else { currentSelection = shipType; if (shipType === 'Destroyer') p.freeDestroyerPlaced = true; }
-        updateUI();
-    } else alert(`Insufficient resources!`);
+        p.buildQueue.push({ type: shipType, turnsLeft: stats.turns });
+        set(gameRef, gameState);
+    } else {
+        // Instant ships just hold selection. Resources deducted on placement.
+        if (shipType !== 'Base' && !(shipType === 'Destroyer' && !p.freeDestroyerPlaced)) {
+            if (p.gold < stats.costG || p.steel < stats.costS) return alert(`Insufficient resources! Need ${stats.costG}G, ${stats.costS}S.`);
+        }
+        currentSelection = shipType; 
+    }
+    updateUI();
 };
 
 function clearSelection() {
+    if (!currentPlayer) return;
     let p = gameState.players[currentPlayer];
     if (currentSelection) {
-        if (deployingFromReserve) p.reserveFleet.push(currentSelection);
-        else if (currentSelection !== 'Base' && currentSelection !== 'Destroyer' && currentSelection !== 'Torpedo Boat' && currentSelection !== 'Submarine' && currentSelection !== 'Decoy') {
+        let depType = typeof currentSelection === 'object' ? currentSelection.type : currentSelection;
+        let stats = UNIT_STATS[depType];
+        
+        if (deployingFromReserve) {
+            p.reserveFleet.push(currentSelection);
+        } else if (stats && stats.turns > 0) { 
+            // Only push Ships that cost Turns back to the ready dock
             p.readyToDeploy.push(currentSelection); 
         }
     }
@@ -396,7 +419,7 @@ function handleTileClick(x, y) {
                 const [sx, sy] = selectedShipCoord.split(',').map(Number);
                 if (getHexDistance(sx, sy, cx, cy) === 1) {
                     let pData = gameState.players[currentPlayer];
-                    if (!pData.minedMountains) pData.minedMountains = []; 
+                    
                     if (pData.minedMountains.includes(coordKey)) return alert("Your fleet has already mined this mountain this turn!");
                     
                     if (GEM_MOUNTAINS.includes(coordKey)) { pData.gems += 1; alert("Destroyer mined 1 Gem from the central mountain! Turn consumed."); } 
@@ -417,12 +440,14 @@ function handleTileClick(x, y) {
 
     if (!gameState.grid) gameState.grid = {};
 
+    // Deployment Logic
     if (currentSelection) {
         if (gameState.grid[coordKey]) return alert("Hex occupied!");
         let pData = gameState.players[currentPlayer];
         
         let depType = typeof currentSelection === 'object' ? currentSelection.type : currentSelection;
         let depHp = typeof currentSelection === 'object' ? currentSelection.hp : UNIT_STATS[depType].maxHp;
+        let stats = UNIT_STATS[depType];
 
         if (depType === 'Base') {
             if (!checkBaseZone(currentPlayer, cx, cy)) return alert("Deploy in your zone!");
@@ -430,12 +455,26 @@ function handleTileClick(x, y) {
         } else {
             if (getHexDistance(cx, cy, pData.baseCoord.x, pData.baseCoord.y) > 1) return alert("Deploy within 1 tile of base!");
             if (depType !== 'Decoy' && pData.activeShips >= 7) return alert("Fleet cap reached (Max 7)!");
+            
+            // Deduct cost on placement for instant ships
+            if (!deployingFromReserve && stats.turns === 0) {
+                let isFreeDestroyer = (depType === 'Destroyer' && !pData.freeDestroyerPlaced);
+                if (!isFreeDestroyer) {
+                    if (pData.gold < stats.costG || pData.steel < stats.costS) {
+                        currentSelection = null; updateUI(); return alert("Insufficient resources!");
+                    }
+                    pData.gold -= stats.costG; pData.steel -= stats.costS;
+                } else {
+                    pData.freeDestroyerPlaced = true;
+                }
+            }
             if (depType !== 'Decoy') pData.activeShips++;
         }
 
         gameState.grid[coordKey] = { type: depType, player: currentPlayer, hp: depHp, hasMoved: true, hasFired: true };
         currentSelection = null; deployingFromReserve = false; set(gameRef, gameState); clearSelection();
     } 
+    // Movement Logic
     else {
         if (gameState.grid[coordKey]) {
             let clickedUnit = gameState.grid[coordKey];
