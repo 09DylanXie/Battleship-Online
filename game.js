@@ -50,6 +50,38 @@ function getFreshPlayerState() {
     };
 }
 
+// --- NEW: AGGRESSIVE DATA SANITIZATION FUNCTION ---
+// This guarantees Firebase will never reject a save file due to corrupted or missing data from old tests
+function deepCleanState(state) {
+    if (!state) return state;
+    if (!state.joinedPlayers) state.joinedPlayers = [];
+    if (!state.grid) state.grid = {};
+    if (!state.players) state.players = { p1: getFreshPlayerState(), p2: getFreshPlayerState(), p3: getFreshPlayerState(), p4: getFreshPlayerState() };
+
+    ['p1', 'p2', 'p3', 'p4'].forEach(p => {
+        if (!state.players[p]) state.players[p] = getFreshPlayerState();
+        let pData = state.players[p];
+        
+        if (!pData.buildQueue) pData.buildQueue = [];
+        if (!pData.readyToDeploy) pData.readyToDeploy = [];
+        if (!pData.reserveFleet) pData.reserveFleet = [];
+        if (!pData.minedMountains) pData.minedMountains = [];
+
+        if (!pData.buildings) pData.buildings = { goldMine: 0, steelFactory: 0, shipyard: 0, baseDefense: 0 };
+        if (pData.buildings.goldMine === undefined) pData.buildings.goldMine = 0;
+        if (pData.buildings.steelFactory === undefined) pData.buildings.steelFactory = 0;
+        if (pData.buildings.shipyard === undefined) pData.buildings.shipyard = 0;
+        if (pData.buildings.baseDefense === undefined) pData.buildings.baseDefense = 0;
+
+        // Clean out fatal NaN errors 
+        if (isNaN(pData.gold) || pData.gold === null) pData.gold = 150;
+        if (isNaN(pData.steel) || pData.steel === null) pData.steel = 10;
+        if (isNaN(pData.gems) || pData.gems === null) pData.gems = 0;
+        if (isNaN(pData.activeShips) || pData.activeShips === null) pData.activeShips = 0;
+    });
+    return state;
+}
+
 let gameState = { 
     turn: 1, matchStarted: false, joinedPlayers: [], activePlayerIndex: 0, 
     players: { p1: getFreshPlayerState(), p2: getFreshPlayerState(), p3: getFreshPlayerState(), p4: getFreshPlayerState() }, 
@@ -61,7 +93,11 @@ const playerNames = { p1: "Player 1 (Cyan)", p2: "Player 2 (Red)", p3: "Player 3
 window.claimPlayer = function(playerId) {
     currentPlayer = playerId; 
     sessionStorage.setItem('battleshipPlayerRole', playerId);
-    if (!gameState.joinedPlayers.includes(playerId)) { gameState.joinedPlayers.push(playerId); set(gameRef, gameState); }
+    if (!gameState.joinedPlayers.includes(playerId)) { 
+        gameState.joinedPlayers.push(playerId); 
+        gameState = deepCleanState(gameState);
+        set(gameRef, gameState); 
+    }
     document.getElementById('role-modal').style.display = 'none';
     document.getElementById('player-badge').innerText = `Commander: ${playerNames[playerId]}`;
     document.getElementById('player-badge').className = playerId; updateUI(); renderBoard();
@@ -77,27 +113,16 @@ if (savedRole) {
 
 window.startMatch = function() {
     if (gameState.joinedPlayers.length < 2) return alert("Waiting for at least 2 Commanders to join the Lobby!");
-    gameState.matchStarted = true; gameState.activePlayerIndex = 0; set(gameRef, gameState);
+    gameState.matchStarted = true; gameState.activePlayerIndex = 0; 
+    gameState = deepCleanState(gameState);
+    set(gameRef, gameState);
 };
 
 const gameRef = ref(db, 'battleship-match-1');
 onValue(gameRef, (snapshot) => { 
     if (snapshot.val()) { 
-        gameState = snapshot.val(); 
-        
-        // Deep Clean Firebase Data Drops
-        if(!gameState.joinedPlayers) gameState.joinedPlayers = [];
-        if(!gameState.grid) gameState.grid = {}; 
-        if(!gameState.players) gameState.players = {};
-
-        ['p1', 'p2', 'p3', 'p4'].forEach(p => {
-            if(!gameState.players[p]) gameState.players[p] = getFreshPlayerState();
-            if(!gameState.players[p].buildQueue) gameState.players[p].buildQueue = [];
-            if(!gameState.players[p].readyToDeploy) gameState.players[p].readyToDeploy = [];
-            if(!gameState.players[p].reserveFleet) gameState.players[p].reserveFleet = [];
-            if(!gameState.players[p].minedMountains) gameState.players[p].minedMountains = [];
-            if(!gameState.players[p].buildings) gameState.players[p].buildings = { goldMine: 0, steelFactory: 0, shipyard: 0, baseDefense: 0 };
-        });
+        // Scrub the incoming data clean before using it
+        gameState = deepCleanState(snapshot.val());
 
         if (currentPlayer && !gameState.matchStarted && !gameState.joinedPlayers.includes(currentPlayer)) {
             sessionStorage.removeItem('battleshipPlayerRole'); currentPlayer = null;
@@ -153,7 +178,10 @@ function handleAutomatedFogChecks() {
             });
         }
     }
-    if (boardChanged && currentPlayer === 'p1') set(gameRef, gameState); 
+    if (boardChanged && currentPlayer === 'p1') {
+        gameState = deepCleanState(gameState);
+        set(gameRef, gameState);
+    }
 }
 
 function createBoard() {
@@ -246,11 +274,9 @@ function updateUI() {
     document.getElementById('btn-repair').style.display = 'none';
     document.getElementById('btn-recall').style.display = 'none';
 
-    // BUG SQUASHED HERE: Removed the hidden null property read that was crashing the system
-    if (currentSelection) {
-        let selType = typeof currentSelection === 'object' ? currentSelection.type : currentSelection;
-        actionText = `Deploying ${selType}...`;
-    } else if (selectedShipCoord) {
+    let selType = typeof currentSelection === 'object' ? currentSelection.type : currentSelection;
+    if (currentSelection) actionText = `Deploying ${selType}...`;
+    else if (selectedShipCoord) {
         let unit = gameState.grid[selectedShipCoord];
         if (unit) {
             document.getElementById('unit-controls').style.display = 'flex';
@@ -309,14 +335,14 @@ function updateUI() {
     }
 }
 
-window.tradeGemForGold = function() { let p = gameState.players[currentPlayer]; if (p.gems >= 1) { p.gems--; p.gold += 30; set(gameRef, gameState); } else alert("No Gems to trade!"); }
-window.tradeGemForSteel = function() { let p = gameState.players[currentPlayer]; if (p.gems >= 1) { p.gems--; p.steel += 3; set(gameRef, gameState); } else alert("No Gems to trade!"); }
+window.tradeGemForGold = function() { let p = gameState.players[currentPlayer]; if (p.gems >= 1) { p.gems--; p.gold += 30; gameState = deepCleanState(gameState); set(gameRef, gameState); } else alert("No Gems to trade!"); }
+window.tradeGemForSteel = function() { let p = gameState.players[currentPlayer]; if (p.gems >= 1) { p.gems--; p.steel += 3; gameState = deepCleanState(gameState); set(gameRef, gameState); } else alert("No Gems to trade!"); }
 window.rushBuild = function(index) {
     let p = gameState.players[currentPlayer];
     if (p.gems >= 2) {
         p.gems -= 2; p.buildQueue[index].turnsLeft--;
         if (p.buildQueue[index].turnsLeft <= 0) { p.readyToDeploy.push(p.buildQueue[index].type); p.buildQueue.splice(index, 1); }
-        set(gameRef, gameState);
+        gameState = deepCleanState(gameState); set(gameRef, gameState);
     } else alert("Need 2 Gems!");
 }
 
@@ -341,7 +367,7 @@ window.buyShip = function(shipType) {
         if (!confirm(`Queue ${shipType} for construction? (${stats.costG}G, ${stats.costS}S)`)) return;
         p.gold -= stats.costG; p.steel -= stats.costS;
         p.buildQueue.push({ type: shipType, turnsLeft: stats.turns });
-        set(gameRef, gameState);
+        gameState = deepCleanState(gameState); set(gameRef, gameState);
     } else {
         if (shipType !== 'Base' && !(shipType === 'Destroyer' && !p.freeDestroyerPlaced)) {
             if (p.gold < stats.costG || p.steel < stats.costS) return alert(`Insufficient resources! Need ${stats.costG}G, ${stats.costS}S.`);
@@ -407,7 +433,7 @@ function handleTileClick(x, y) {
             if (target.type !== 'Base') { gameState.players[currentPlayer].gems += 1; gameState.players[target.player].activeShips--; }
             delete gameState.grid[coordKey];
         }
-        set(gameRef, gameState); clearSelection(); return;
+        gameState = deepCleanState(gameState); set(gameRef, gameState); clearSelection(); return;
     }
 
     if (MOUNTAINS.includes(coordKey)) {
@@ -429,7 +455,7 @@ function handleTileClick(x, y) {
                         else return alert("Invalid choice. Mining cancelled.");
                     }
                     pData.minedMountains.push(coordKey); unit.hasFired = true; unit.hasMoved = true; 
-                    set(gameRef, gameState); clearSelection(); return;
+                    gameState = deepCleanState(gameState); set(gameRef, gameState); clearSelection(); return;
                 }
             }
         }
@@ -461,16 +487,14 @@ function handleTileClick(x, y) {
                         currentSelection = null; updateUI(); return alert("Insufficient resources!");
                     }
                     pData.gold -= stats.costG; pData.steel -= stats.costS;
-                } else {
-                    pData.freeDestroyerPlaced = true;
-                }
+                } else pData.freeDestroyerPlaced = true;
             }
             if (depType !== 'Decoy') pData.activeShips++;
         }
 
         gameState.grid[coordKey] = { type: depType, player: currentPlayer, hp: depHp, hasMoved: true, hasFired: true };
         currentSelection = null; deployingFromReserve = false; 
-        set(gameRef, gameState); clearSelection();
+        gameState = deepCleanState(gameState); set(gameRef, gameState); clearSelection();
     } 
     // Movement Logic
     else {
@@ -488,7 +512,7 @@ function handleTileClick(x, y) {
             const [sx, sy] = selectedShipCoord.split(',').map(Number);
             if (getHexDistance(sx, sy, cx, cy) > UNIT_STATS[unit.type].move) return alert(`Out of range!`);
             unit.hasMoved = true; gameState.grid[coordKey] = unit; delete gameState.grid[selectedShipCoord]; 
-            set(gameRef, gameState); clearSelection();
+            gameState = deepCleanState(gameState); set(gameRef, gameState); clearSelection();
         }
     }
 }
@@ -500,7 +524,7 @@ document.getElementById('btn-fire').addEventListener('click', () => {
 document.getElementById('btn-repair').addEventListener('click', () => { 
     let unit = gameState.grid[selectedShipCoord];
     unit.hp = Math.min(unit.hp + 3, UNIT_STATS[unit.type].maxHp); unit.hasMoved = true; unit.hasFired = true; 
-    alert(`${unit.type} repaired 3 HP!`); set(gameRef, gameState); clearSelection();
+    alert(`${unit.type} repaired 3 HP!`); gameState = deepCleanState(gameState); set(gameRef, gameState); clearSelection();
 });
 document.getElementById('btn-recall').addEventListener('click', () => { 
     let p = gameState.players[currentPlayer];
@@ -508,40 +532,61 @@ document.getElementById('btn-recall').addEventListener('click', () => {
     let unit = gameState.grid[selectedShipCoord];
     p.reserveFleet.push({ type: unit.type, hp: unit.hp });
     p.activeShips--; delete gameState.grid[selectedShipCoord];
-    alert(`${unit.type} recalled to Reserve Fleet.`); set(gameRef, gameState); clearSelection(); 
+    alert(`${unit.type} recalled to Reserve Fleet.`); gameState = deepCleanState(gameState); set(gameRef, gameState); clearSelection(); 
 });
 document.getElementById('btn-cancel').addEventListener('click', () => { clearSelection(); });
 
-document.getElementById('btn-buy-goldmine').addEventListener('click', () => { let p = gameState.players[currentPlayer]; if(p.gold >= 20 && p.steel >= 2) { p.gold -= 20; p.steel -= 2; p.buildings.goldMine++; set(gameRef, gameState); } else alert("Insufficient Funds!"); });
-document.getElementById('btn-buy-steelfactory').addEventListener('click', () => { let p = gameState.players[currentPlayer]; if(p.gold >= 30 && p.steel >= 1) { p.gold -= 30; p.steel -= 1; p.buildings.steelFactory++; set(gameRef, gameState); } else alert("Insufficient Funds!"); });
-document.getElementById('btn-buy-shipyard').addEventListener('click', () => { let p = gameState.players[currentPlayer]; if(p.buildings.shipyard >= 1) return alert("You already own a Shipyard!"); if(p.gold >= 50 && p.steel >= 3) { p.gold -= 50; p.steel -= 3; p.buildings.shipyard++; set(gameRef, gameState); } else alert("Insufficient Funds!"); });
-document.getElementById('btn-buy-basedefense').addEventListener('click', () => { let p = gameState.players[currentPlayer]; if(p.gold >= 30) { p.gold -= 30; p.buildings.baseDefense++; set(gameRef, gameState); } else alert("Insufficient Funds!"); });
+document.getElementById('btn-buy-goldmine').addEventListener('click', () => { let p = gameState.players[currentPlayer]; if(p.gold >= 20 && p.steel >= 2) { p.gold -= 20; p.steel -= 2; p.buildings.goldMine++; gameState = deepCleanState(gameState); set(gameRef, gameState); } else alert("Insufficient Funds!"); });
+document.getElementById('btn-buy-steelfactory').addEventListener('click', () => { let p = gameState.players[currentPlayer]; if(p.gold >= 30 && p.steel >= 1) { p.gold -= 30; p.steel -= 1; p.buildings.steelFactory++; gameState = deepCleanState(gameState); set(gameRef, gameState); } else alert("Insufficient Funds!"); });
+document.getElementById('btn-buy-shipyard').addEventListener('click', () => { let p = gameState.players[currentPlayer]; if(p.buildings.shipyard >= 1) return alert("You already own a Shipyard!"); if(p.gold >= 50 && p.steel >= 3) { p.gold -= 50; p.steel -= 3; p.buildings.shipyard++; gameState = deepCleanState(gameState); set(gameRef, gameState); } else alert("Insufficient Funds!"); });
+document.getElementById('btn-buy-basedefense').addEventListener('click', () => { let p = gameState.players[currentPlayer]; if(p.gold >= 30) { p.gold -= 30; p.buildings.baseDefense++; gameState = deepCleanState(gameState); set(gameRef, gameState); } else alert("Insufficient Funds!"); });
 
+// --- FIX 3: THE BULLETPROOF END TURN FUNCTION ---
 document.getElementById('btn-end-turn').addEventListener('click', () => {
     if (!gameState.matchStarted || gameState.joinedPlayers[gameState.activePlayerIndex] !== currentPlayer) return;
+    
+    // Clear selection immediately so nothing is dangling
+    clearSelection();
+
     let p = gameState.players[currentPlayer];
     
-    p.gold += 20 + (p.buildings.goldMine * 10); p.steel += 2 + (p.buildings.steelFactory * 1); 
+    p.gold += 20 + (p.buildings.goldMine * 10); 
+    p.steel += 2 + (p.buildings.steelFactory * 1); 
     
     let newQueue = [];
     p.buildQueue.forEach(q => {
         q.turnsLeft--;
-        if (q.turnsLeft <= 0) p.readyToDeploy.push(q.type); else newQueue.push(q);
+        if (q.turnsLeft <= 0) p.readyToDeploy.push(q.type); 
+        else newQueue.push(q);
     });
-    p.buildQueue = newQueue; p.minedMountains = [];
+    p.buildQueue = newQueue; 
+    
+    // Erase the mined mountains for this player
+    p.minedMountains = [];
 
+    // Reset move/fire actions for this player's ships
     for (let key in gameState.grid) {
         if (gameState.grid[key].player === currentPlayer) {
-            gameState.grid[key].hasMoved = false; gameState.grid[key].hasFired = false;
+            gameState.grid[key].hasMoved = false; 
+            gameState.grid[key].hasFired = false;
         }
     }
     
+    // Advance the Turn Tracker
     gameState.activePlayerIndex++;
-    if (gameState.activePlayerIndex >= gameState.joinedPlayers.length) { gameState.activePlayerIndex = 0; gameState.turn++; }
+    if (gameState.activePlayerIndex >= gameState.joinedPlayers.length) { 
+        gameState.activePlayerIndex = 0; 
+        gameState.turn++; 
+    }
     
-    // SAFETY WRAPPER: Force the database save BEFORE attempting to clear the UI
+    // Run the Deep Clean BEFORE saving
+    gameState = deepCleanState(gameState);
+
+    // Push to Firebase and alert the user if Google rejects the save file
     set(gameRef, gameState).then(() => {
-        clearSelection(); 
+        console.log("Turn successfully passed!");
+    }).catch((error) => {
+        alert("CRITICAL ERROR: Firebase rejected the end of your turn! Error details: " + error);
     });
 });
 
