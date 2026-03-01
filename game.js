@@ -80,13 +80,12 @@ window.startMatch = function() {
     gameState.matchStarted = true; gameState.activePlayerIndex = 0; set(gameRef, gameState);
 };
 
-// --- FIX 1: THE DEEP CLEAN FIREBASE FAILSAFE ---
 const gameRef = ref(db, 'battleship-match-1');
 onValue(gameRef, (snapshot) => { 
     if (snapshot.val()) { 
         gameState = snapshot.val(); 
         
-        // Force missing arrays to exist to prevent Turn Tracker crashes
+        // Deep Clean Firebase Data Drops
         if(!gameState.joinedPlayers) gameState.joinedPlayers = [];
         if(!gameState.grid) gameState.grid = {}; 
         if(!gameState.players) gameState.players = {};
@@ -247,29 +246,32 @@ function updateUI() {
     document.getElementById('btn-repair').style.display = 'none';
     document.getElementById('btn-recall').style.display = 'none';
 
-    let selType = typeof currentSelection === 'object' ? currentSelection.type : currentSelection;
-    if (currentSelection) actionText = `Deploying ${selType}...`;
-    else if (selectedShipCoord) {
+    // BUG SQUASHED HERE: Removed the hidden null property read that was crashing the system
+    if (currentSelection) {
+        let selType = typeof currentSelection === 'object' ? currentSelection.type : currentSelection;
+        actionText = `Deploying ${selType}...`;
+    } else if (selectedShipCoord) {
         let unit = gameState.grid[selectedShipCoord];
-        document.getElementById('unit-controls').style.display = 'flex';
-        
-        let rangeDisplay = UNIT_STATS[unit.type].range;
-        if (unit.type === 'Base' && pData.buildings.baseDefense === 0) rangeDisplay = 0; 
+        if (unit) {
+            document.getElementById('unit-controls').style.display = 'flex';
+            let rangeDisplay = UNIT_STATS[unit.type].range;
+            if (unit.type === 'Base' && pData.buildings.baseDefense === 0) rangeDisplay = 0; 
 
-        document.getElementById('unit-stats').innerText = `${unit.type} | HP: ${unit.hp} | Range: ${rangeDisplay}`;
-        
-        if (unit.player === currentPlayer && unit.type !== 'Base' && unit.type !== 'Decoy') {
-            const [sx, sy] = selectedShipCoord.split(',').map(Number);
-            if (pData.baseCoord && getHexDistance(sx, sy, pData.baseCoord.x, pData.baseCoord.y) <= 1) {
-                if (pData.buildings.shipyard > 0 && unit.hp < UNIT_STATS[unit.type].maxHp) {
-                    document.getElementById('btn-repair').style.display = 'inline-block';
+            document.getElementById('unit-stats').innerText = `${unit.type} | HP: ${unit.hp} | Range: ${rangeDisplay}`;
+            
+            if (unit.player === currentPlayer && unit.type !== 'Base' && unit.type !== 'Decoy') {
+                const [sx, sy] = selectedShipCoord.split(',').map(Number);
+                if (pData.baseCoord && getHexDistance(sx, sy, pData.baseCoord.x, pData.baseCoord.y) <= 1) {
+                    if (pData.buildings.shipyard > 0 && unit.hp < UNIT_STATS[unit.type].maxHp) {
+                        document.getElementById('btn-repair').style.display = 'inline-block';
+                    }
+                    document.getElementById('btn-recall').style.display = 'inline-block';
                 }
-                document.getElementById('btn-recall').style.display = 'inline-block';
             }
-        }
 
-        if (isTargeting) actionText = `🎯 SELECT ENEMY TARGET WITHIN RANGE ${rangeDisplay}`;
-        else actionText = `Move ship or select action.`;
+            if (isTargeting) actionText = `🎯 SELECT ENEMY TARGET WITHIN RANGE ${rangeDisplay}`;
+            else actionText = `Move ship or select action.`;
+        }
     }
     document.getElementById('action-status').innerText = actionText;
 
@@ -328,7 +330,6 @@ window.prepDeployReserve = function(index) {
     currentSelection = p.reserveFleet[index]; deployingFromReserve = true; p.reserveFleet.splice(index, 1); updateUI();
 };
 
-// --- FIX 2: THE "SHOPPING CART" BUY SYSTEM ---
 window.buyShip = function(shipType) {
     let p = gameState.players[currentPlayer]; const stats = UNIT_STATS[shipType];
     
@@ -336,14 +337,12 @@ window.buyShip = function(shipType) {
     if (shipType !== 'Base' && !p.basePlaced) return alert("Deploy Base first!");
 
     if (stats.turns > 0) {
-        // Queued ships take resources immediately
         if (p.gold < stats.costG || p.steel < stats.costS) return alert(`Insufficient resources!`);
         if (!confirm(`Queue ${shipType} for construction? (${stats.costG}G, ${stats.costS}S)`)) return;
         p.gold -= stats.costG; p.steel -= stats.costS;
         p.buildQueue.push({ type: shipType, turnsLeft: stats.turns });
         set(gameRef, gameState);
     } else {
-        // Instant ships just hold selection. Resources deducted on placement.
         if (shipType !== 'Base' && !(shipType === 'Destroyer' && !p.freeDestroyerPlaced)) {
             if (p.gold < stats.costG || p.steel < stats.costS) return alert(`Insufficient resources! Need ${stats.costG}G, ${stats.costS}S.`);
         }
@@ -362,7 +361,6 @@ function clearSelection() {
         if (deployingFromReserve) {
             p.reserveFleet.push(currentSelection);
         } else if (stats && stats.turns > 0) { 
-            // Only push Ships that cost Turns back to the ready dock
             p.readyToDeploy.push(currentSelection); 
         }
     }
@@ -409,7 +407,7 @@ function handleTileClick(x, y) {
             if (target.type !== 'Base') { gameState.players[currentPlayer].gems += 1; gameState.players[target.player].activeShips--; }
             delete gameState.grid[coordKey];
         }
-        clearSelection(); set(gameRef, gameState); return;
+        set(gameRef, gameState); clearSelection(); return;
     }
 
     if (MOUNTAINS.includes(coordKey)) {
@@ -431,7 +429,7 @@ function handleTileClick(x, y) {
                         else return alert("Invalid choice. Mining cancelled.");
                     }
                     pData.minedMountains.push(coordKey); unit.hasFired = true; unit.hasMoved = true; 
-                    clearSelection(); set(gameRef, gameState); return;
+                    set(gameRef, gameState); clearSelection(); return;
                 }
             }
         }
@@ -456,7 +454,6 @@ function handleTileClick(x, y) {
             if (getHexDistance(cx, cy, pData.baseCoord.x, pData.baseCoord.y) > 1) return alert("Deploy within 1 tile of base!");
             if (depType !== 'Decoy' && pData.activeShips >= 7) return alert("Fleet cap reached (Max 7)!");
             
-            // Deduct cost on placement for instant ships
             if (!deployingFromReserve && stats.turns === 0) {
                 let isFreeDestroyer = (depType === 'Destroyer' && !pData.freeDestroyerPlaced);
                 if (!isFreeDestroyer) {
@@ -472,7 +469,8 @@ function handleTileClick(x, y) {
         }
 
         gameState.grid[coordKey] = { type: depType, player: currentPlayer, hp: depHp, hasMoved: true, hasFired: true };
-        currentSelection = null; deployingFromReserve = false; set(gameRef, gameState); clearSelection();
+        currentSelection = null; deployingFromReserve = false; 
+        set(gameRef, gameState); clearSelection();
     } 
     // Movement Logic
     else {
@@ -490,7 +488,7 @@ function handleTileClick(x, y) {
             const [sx, sy] = selectedShipCoord.split(',').map(Number);
             if (getHexDistance(sx, sy, cx, cy) > UNIT_STATS[unit.type].move) return alert(`Out of range!`);
             unit.hasMoved = true; gameState.grid[coordKey] = unit; delete gameState.grid[selectedShipCoord]; 
-            clearSelection(); set(gameRef, gameState);
+            set(gameRef, gameState); clearSelection();
         }
     }
 }
@@ -502,7 +500,7 @@ document.getElementById('btn-fire').addEventListener('click', () => {
 document.getElementById('btn-repair').addEventListener('click', () => { 
     let unit = gameState.grid[selectedShipCoord];
     unit.hp = Math.min(unit.hp + 3, UNIT_STATS[unit.type].maxHp); unit.hasMoved = true; unit.hasFired = true; 
-    alert(`${unit.type} repaired 3 HP!`); clearSelection(); set(gameRef, gameState);
+    alert(`${unit.type} repaired 3 HP!`); set(gameRef, gameState); clearSelection();
 });
 document.getElementById('btn-recall').addEventListener('click', () => { 
     let p = gameState.players[currentPlayer];
@@ -510,7 +508,7 @@ document.getElementById('btn-recall').addEventListener('click', () => {
     let unit = gameState.grid[selectedShipCoord];
     p.reserveFleet.push({ type: unit.type, hp: unit.hp });
     p.activeShips--; delete gameState.grid[selectedShipCoord];
-    alert(`${unit.type} recalled to Reserve Fleet.`); clearSelection(); set(gameRef, gameState);
+    alert(`${unit.type} recalled to Reserve Fleet.`); set(gameRef, gameState); clearSelection(); 
 });
 document.getElementById('btn-cancel').addEventListener('click', () => { clearSelection(); });
 
@@ -540,7 +538,11 @@ document.getElementById('btn-end-turn').addEventListener('click', () => {
     
     gameState.activePlayerIndex++;
     if (gameState.activePlayerIndex >= gameState.joinedPlayers.length) { gameState.activePlayerIndex = 0; gameState.turn++; }
-    clearSelection(); set(gameRef, gameState); 
+    
+    // SAFETY WRAPPER: Force the database save BEFORE attempting to clear the UI
+    set(gameRef, gameState).then(() => {
+        clearSelection(); 
+    });
 });
 
 document.getElementById('btn-reset').addEventListener('click', () => {
